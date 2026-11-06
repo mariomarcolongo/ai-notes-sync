@@ -7,14 +7,14 @@ name = "ai-notes-sync"
 version = "0.1.0"
 description = "Collect your AI assistants' notes into one Git-backed Basic Memory vault and record which app, model and setting made each edit."
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "Mario Marcolongo" }]
 requires-python = ">=3.9"
 dependencies = []
 keywords = ["ai", "mcp", "basic-memory", "obsidian", "git", "provenance", "claude", "codex"]
 classifiers = [
   "Programming Language :: Python :: 3",
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: Apache Software License",
   "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
 ]

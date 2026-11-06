@@ -16,7 +16,7 @@ def cfg(tmp_path: Path) -> Config:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=vault, check=True)
     subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=vault, check=True)
     return Config(home=home, vault=vault, state_dir=home / ".state",
-                  project_roots=[home / "Code"], server_command=["true"], git_push=False)
+                  project_roots=[home / "Code"], server_command=["true"], git_push=False, notify=False)
 
 
 def write(path: Path, text: str) -> Path:

@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from . import guard
 from .config import Config
 
 SKIP_DIRS = {".git", ".codex-baseline", ".system_generated", "node_modules"}
@@ -72,6 +73,8 @@ class Importer:
             self.state = {}
         self.planned: Dict[Path, Tuple[str, str, str, Path]] = {}
         self.written = 0
+        self.quarantined = 0
+        self.approvals = guard.Approvals(cfg)
 
     def plan(self, dest: Path, title: str, app: str, date: str, src: Path) -> None:
         prev = self.planned.get(dest)
@@ -91,7 +94,7 @@ class Importer:
             raw = src.read_text(errors="replace")
             digest = hashlib.sha256(raw.encode()).hexdigest()
             key = str(dest.relative_to(vault))
-            if self.state.get(key) == digest and dest.exists():
+            if self.state.get(key) == digest and (dest.exists() or (vault / guard.QUARANTINE / key).exists()):
                 continue
             fm, body = split_frontmatter(raw)
             kept = [l for l in fm if l.split(":", 1)[0].strip() not in OWN_FM_KEYS]
@@ -102,9 +105,17 @@ class Importer:
                     f"source_path: {json.dumps(self._shown_path(src))}",
                     f"source_date: {date}",
                     *kept, "---", ""]
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text("\n".join(head) + body)
+            rendered = "\n".join(head) + body
             self.state[key] = digest
+            if self.cfg.guard and digest not in self.approvals:
+                findings = guard.scan(raw)
+                if guard.is_high(findings):
+                    guard.quarantine(self.cfg, key, rendered, ["possible prompt injection in imported note"],
+                                     findings, who={"app": app, "source": digest})
+                    self.quarantined += 1
+                    continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(rendered)
             self.written += 1
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps(self.state, indent=1, sort_keys=True))

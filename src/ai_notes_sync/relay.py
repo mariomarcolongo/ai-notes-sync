@@ -28,10 +28,11 @@ SELF_REPORT_KEYS = ("model", "reasoning_effort", "effort", "thinking", "temperat
 class Recorder:
     """Watches JSON-RPC traffic (one message per line) and logs note changes."""
 
-    def __init__(self, label: str, log_path, clock=time.time):
+    def __init__(self, label: str, log_path, clock=time.time, read_only: bool = False):
         self.label = label
         self.log_path = log_path
         self.clock = clock
+        self.read_only = read_only
         self.client: Dict[str, Any] = {}
         self.pending: Dict[Any, Dict[str, Any]] = {}
         self.lock = threading.Lock()
@@ -64,6 +65,24 @@ class Recorder:
                 "directory": args.get("directory"),
                 "destination": args.get("destination_path") or args.get("destination"),
             }
+
+    def block(self, line: bytes) -> Optional[bytes]:
+        """For a read-only app, the refusal to send back instead of forwarding a change."""
+        if not self.read_only:
+            return None
+        try:
+            msg = json.loads(line)
+        except Exception:
+            return None
+        if not (isinstance(msg, dict) and msg.get("method") == "tools/call"
+                and CHANGING.search((msg.get("params") or {}).get("name", ""))):
+            return None
+        entry = self.pending.pop(msg.get("id"), None) or {}
+        self.write({**entry, "ok": False, "blocked": True, "paths": []})
+        text = (f"Blocked: {self.label} may read the shared notes but not change them "
+                "(ai-notes-sync read_only_apps). Tell the user what you wanted to save instead.")
+        return (json.dumps({"jsonrpc": "2.0", "id": msg.get("id"),
+                            "result": {"content": [{"type": "text", "text": text}], "isError": True}}) + "\n").encode()
 
     def on_response(self, line: bytes) -> Optional[Dict[str, Any]]:
         try:
@@ -106,20 +125,28 @@ def paths_from_result(text: str) -> List[str]:
 
 
 def run(cfg: Config, label: str) -> int:
-    rec = Recorder(label, cfg.edit_log)
+    rec = Recorder(label, cfg.edit_log, read_only=label in cfg.read_only_apps)
+    out_lock = threading.Lock()
     env = dict(os.environ, BASIC_MEMORY_NO_PROMOS=os.environ.get("BASIC_MEMORY_NO_PROMOS", "1"))
     child = subprocess.Popen(cfg.server(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, bufsize=0)
 
     def upstream():
         for line in child.stdout:
-            sys.stdout.buffer.write(line)
-            sys.stdout.buffer.flush()
+            with out_lock:
+                sys.stdout.buffer.write(line)
+                sys.stdout.buffer.flush()
             rec.on_response(line)
 
     threading.Thread(target=upstream, daemon=True).start()
     try:
         for line in sys.stdin.buffer:
             rec.on_request(line)
+            refusal = rec.block(line)
+            if refusal:
+                with out_lock:
+                    sys.stdout.buffer.write(refusal)
+                    sys.stdout.buffer.flush()
+                continue
             child.stdin.write(line)
             child.stdin.flush()
     except (BrokenPipeError, KeyboardInterrupt):

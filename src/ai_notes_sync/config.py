@@ -34,6 +34,13 @@ class Config:
     server_command: List[str] = field(default_factory=list)
     app_names: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_APP_NAMES))
     git_push: bool = True
+    # prompt-injection guard
+    guard: bool = True
+    protected: List[str] = field(default_factory=lambda: ["notes/Filing guide.md", "README.md"])
+    read_only_apps: List[str] = field(default_factory=list)
+    shrink_ratio: float = 0.4   # an AI edit keeping less than this share of a note is held back
+    shrink_min_chars: int = 400
+    notify: bool = True
 
     # derived paths
     @property
@@ -76,6 +83,14 @@ def load(path: Optional[Path] = None) -> Config:
         cfg.server_command = list(data["server_command"])
     if "app_names" in data:
         cfg.app_names.update(data["app_names"])
-    if "git_push" in data:
-        cfg.git_push = bool(data["git_push"])
+    for key in ("git_push", "guard", "notify"):
+        if key in data:
+            setattr(cfg, key, bool(data[key]))
+    for key in ("protected", "read_only_apps"):
+        if key in data:
+            setattr(cfg, key, list(data[key]))
+    if "shrink_ratio" in data:
+        cfg.shrink_ratio = float(data["shrink_ratio"])
+    if "shrink_min_chars" in data:
+        cfg.shrink_min_chars = int(data["shrink_min_chars"])
     return cfg

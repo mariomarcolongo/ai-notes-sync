@@ -3,8 +3,30 @@
 import argparse
 import sys
 
-from . import __version__, apps, commit, importers, relay, schedule, stats, sync
+from pathlib import Path
+
+from . import __version__, apps, commit, guard, importers, relay, schedule, stats, sync, undo
 from .config import CONFIG_PATH, load
+
+
+def scan_paths(cfg, paths) -> int:
+    roots = [Path(p).expanduser() for p in paths] or [cfg.vault]
+    files = []
+    for r in roots:
+        files += [r] if r.is_file() else [f for f in r.rglob("*.md") if ".git" not in f.parts]
+    hits = 0
+    for f in sorted(files):
+        try:
+            findings = guard.scan(f.read_text(errors="replace"))
+        except OSError:
+            continue
+        if findings:
+            hits += 1
+            print(f)
+            for x in findings:
+                print(f"  [{x.severity}] {x.kind} (line {x.line}): {x.excerpt}")
+    print(f"\n{len(files)} file(s) checked, {hits} with findings.")
+    return 1 if hits else 0
 
 
 def main(argv=None) -> int:
@@ -29,6 +51,16 @@ def main(argv=None) -> int:
     s.add_argument("--every", type=int, default=2, metavar="MINUTES")
     s.add_argument("--remove", action="store_true")
     sub.add_parser("stats", help="edits per app, model, reasoning effort and evidence")
+    rv = sub.add_parser("review", help="list notes held back by the injection guard")
+    rv.add_argument("--approve", metavar="PATH")
+    rv.add_argument("--discard", metavar="PATH")
+    sc = sub.add_parser("scan", help="check notes for prompt-injection patterns (reads only)")
+    sc.add_argument("paths", nargs="*", help="files or folders (default: the whole vault)")
+    u = sub.add_parser("undo", help="undo what one AI app changed (dry run unless --apply)")
+    u.add_argument("app", help="app label, e.g. antigravity")
+    u.add_argument("--since", help='e.g. "2026-11-06 10:00" or "2 hours ago"')
+    u.add_argument("--model", help="only edits by this model")
+    u.add_argument("--apply", action="store_true")
     sub.add_parser("config", help="show the settings in use")
 
     args = p.parse_args(argv)
@@ -54,6 +86,17 @@ def main(argv=None) -> int:
         print(schedule.remove(cfg) if args.remove else schedule.install(cfg, args.every))
     elif args.cmd == "stats":
         print(stats.run(cfg))
+    elif args.cmd == "review":
+        if args.approve:
+            print(guard.approve(cfg, args.approve))
+        elif args.discard:
+            print(guard.discard(cfg, args.discard))
+        else:
+            print(guard.review_text(cfg))
+    elif args.cmd == "scan":
+        return scan_paths(cfg, args.paths)
+    elif args.cmd == "undo":
+        print(undo.run(cfg, args.app, args.since, args.model, args.apply))
     elif args.cmd == "config":
         print(f"config file: {CONFIG_PATH}{'' if CONFIG_PATH.exists() else ' (not found, using defaults)'}")
         for k in ("vault", "state_dir", "project_roots", "sources", "git_push"):

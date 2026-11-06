@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "ai-notes-sync"
+abstract: "Collects AI assistants' notes into one Git-backed Basic Memory vault, records which app, model and reasoning setting made each edit, and guards the shared notes against prompt injection."
+type: software
+authors:
+  - family-names: "Marcolongo"
+    given-names: "Mario"
+repository-code: "https://github.com/mariomarcolongo/ai-notes-sync"
+license: Apache-2.0
+version: 0.1.0
+date-released: 2026-11-06
+keywords:
+  - ai
+  - mcp
+  - basic-memory
+  - provenance
+  - prompt-injection

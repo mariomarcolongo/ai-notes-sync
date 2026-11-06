@@ -11,13 +11,16 @@ Every AI edit is also appended to <vault>/.ai-notes/edits.jsonl, one JSON line p
 edit, so edits can be evaluated later by app, model and setting.
 """
 
+import difflib
 import json
 import re
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from . import guard
 from .config import Config
 from .verify import verify
 
@@ -93,6 +96,88 @@ def _source_app(cfg: Config, path: str) -> str:
     return parts[1] if len(parts) > 1 else "import"
 
 
+def _changed_paths(git: Git) -> List[Tuple[str, bool]]:
+    """(path, exists) for every changed or new file in the working tree."""
+    out, tokens = [], git("status", "--porcelain=v1", "-z", "-uall").split("\0")
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        i += 1
+        if len(t) < 4:
+            continue
+        code, path = t[:2], t[3:]
+        if "R" in code or "C" in code:
+            i += 1  # skip the old name of a rename
+        out.append((path, "D" not in code))
+    return out
+
+
+def _added_text(old: Optional[str], new: str) -> str:
+    if old is None:
+        return new
+    return "\n".join(l[1:] for l in difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="", n=0)
+                     if l.startswith("+") and not l.startswith("+++"))
+
+
+def run_guard(cfg: Config, git: Git, last_by_path: Dict[str, Tuple[Dict, Dict]]) -> Tuple[List[str], Dict[str, List[str]]]:
+    """Quarantine risky AI changes before they are committed. Returns (messages, warnings by path)."""
+    messages: List[str] = []
+    warnings: Dict[str, List[str]] = {}
+    if not cfg.guard:
+        return messages, warnings
+    approvals = guard.Approvals(cfg)
+    for path, exists in _changed_paths(git):
+        if path.startswith((".ai-notes/", guard.QUARANTINE + "/", "imported/")) or not path.endswith(".md"):
+            continue
+        full = cfg.vault / path
+        old = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=cfg.vault, capture_output=True, text=True)
+        old_text = old.stdout if old.returncode == 0 else None
+        e, s = last_by_path.get(path, (None, None))
+        who = {k: v for k, v in {"app": e and e.get("app"), "model": s and s.get("model"),
+                                 "reasoning_effort": s and s.get("reasoning_effort"),
+                                 "evidence": s and s.get("evidence")}.items() if v}
+        if not exists:
+            if e and path in cfg.protected and old_text is not None:
+                full.parent.mkdir(parents=True, exist_ok=True)
+                full.write_text(old_text)
+                guard.log_event(cfg, {"event": "restored", "path": path, "reason": "protected file deleted by an AI",
+                                      "by": who, "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+                messages.append(f"Guard: restored protected {path} (deleted by {cfg.name(e.get('app'))})")
+            continue
+        try:
+            new_text = full.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        if guard.digest(new_text) in approvals:
+            continue
+        findings = guard.scan(_added_text(old_text, new_text))
+        if e:  # changed by an AI through the relay
+            reasons = []
+            if path in cfg.protected:
+                reasons.append("protected file changed by an AI")
+            if guard.is_high(findings):
+                reasons.append("possible prompt injection")
+            if (old_text and len(old_text) >= cfg.shrink_min_chars
+                    and len(new_text) < cfg.shrink_ratio * len(old_text)):
+                reasons.append(f"large deletion (kept {round(100 * len(new_text) / len(old_text))}% of the note)")
+            if reasons:
+                guard.quarantine(cfg, path, new_text, reasons, findings, who)
+                if old_text is None:
+                    full.unlink()
+                else:
+                    full.write_text(old_text)
+                messages.append(f"Guard: quarantined {path} ({'; '.join(reasons)})")
+                continue
+        if findings:
+            kinds = sorted({f.kind for f in findings})
+            warnings[path] = kinds
+            guard.log_event(cfg, {"event": "warning", "path": path, "by": who or {"app": "you"},
+                                  "findings": [vars(f) for f in findings],
+                                  "time": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+            messages.append(f"Guard: warning for {path}: {', '.join(kinds)}")
+    return messages, warnings
+
+
 def run(cfg: Config) -> List[str]:
     """Commit everything that changed. Returns the commit subjects."""
     git = Git(cfg.vault)
@@ -112,18 +197,19 @@ def run(cfg: Config) -> List[str]:
         with open(cfg.ledger, "a") as f:
             f.write("\n".join(ledger) + "\n")
 
+    subjects, warnings = run_guard(cfg, git, last_by_path)
+
     git("add", "-A")
     changed = [p for p in git("diff", "--cached", "--name-only", "-z").split("\0") if p]
-    subjects: List[str] = []
     if changed:
         me = git("config", "user.name", check=False).strip() or "Me"
         my_email = git("config", "user.email", check=False).strip() or "me@ai-notes.local"
-        ledger_rel = str(cfg.ledger.relative_to(cfg.vault))
-
         groups = defaultdict(list)
         for path in changed:
-            if path == ledger_rel:
+            if path.startswith(".ai-notes/"):
                 groups[("~ledger", "", "", "", "")].append(path)
+            elif path.startswith(guard.QUARANTINE + "/"):
+                groups[("~guard", "", "", "", "")].append(path)
             elif path in last_by_path:
                 e, s = last_by_path[path]
                 groups[("ai", e.get("app") or "unknown-ai", s.get("model") or "",
@@ -142,6 +228,10 @@ def run(cfg: Config) -> List[str]:
             elif kind == "~ledger":
                 name, email = "ai-notes-sync", "sync@ai-notes.local"
                 subject = "Record AI edit details"
+            elif kind == "~guard":
+                name, email = "ai-notes-sync guard", "guard@ai-notes.local"
+                n = sum(1 for f in files if not f.endswith(".json"))
+                subject = f"Guard: quarantine updated ({n} note(s))"
             elif kind == "import":
                 name, email = cfg.name(who), f"{who}@ai-notes.local"
                 subject = f"{name}: imported/updated {len(files)} note(s)"
@@ -155,6 +245,9 @@ def run(cfg: Config) -> List[str]:
                 trailers = [f"AI-App: {app}", f"AI-Model: {model or 'unknown'}",
                             f"AI-Reasoning-Effort: {effort or 'unknown'}", f"AI-Evidence: {evidence}"]
                 trailers += [f"AI-{k.replace('_', '-').title()}: {s[k]}" for k in TRAILER_KEYS if s.get(k)]
+                warned = sorted({k for f in files for k in warnings.get(f, [])})
+                if warned:
+                    trailers.append(f"AI-Guard-Warning: {', '.join(warned)}")
             args = ["commit", "-q", "--author", f"{name} <{email}>", "-m", subject,
                     "-m", "\n".join(f"- {p}" for p in sorted(files)[:200])]
             if trailers:

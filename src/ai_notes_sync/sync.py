@@ -53,9 +53,19 @@ def run(cfg: Config, push: bool = True) -> int:
         imp = importers.run(cfg)
         if imp.written:
             print(f"import: {len(imp.planned)} files tracked, {imp.written} written")
+        if imp.quarantined:
+            print(f"Guard: {imp.quarantined} imported note(s) quarantined; see `ai-notes-sync review`")
         for subject in commit.run(cfg):
             print(subject)
         if push and cfg.git_push and has_remote(cfg):
-            _git(cfg, "pull", "-q", "--rebase", "--autostash")
+            dirty = subprocess.run(["git", "status", "--porcelain"], cwd=cfg.vault,
+                                   capture_output=True, text=True).stdout.strip()
+            if dirty:
+                # a note changed during this round: commit it next round rather than stash it
+                print("pull skipped: notes changed during this round; they go in the next one")
+            elif not _git(cfg, "pull", "-q", "--rebase"):
+                subprocess.run(["git", "rebase", "--abort"], cwd=cfg.vault, capture_output=True)
+                print("pull undone: the same note changed here and on another device; "
+                      "resolve it with `git -C <vault> pull --rebase`")
             _git(cfg, "push", "-q")
     return 0
